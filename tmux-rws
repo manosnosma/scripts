@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+
+SESSION="rws"
+PROJECT_DIR="$HOME/Projects/apps/rws"
+
+tmux_go() {
+  local target="$1"
+
+  if [[ -n "$TMUX" ]]; then
+    tmux switch-client -t "$target"
+  else
+    tmux attach -t "$target"
+  fi
+}
+
+# If it exists, just go to it
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  tmux_go "$SESSION"
+  exit 0
+fi
+
+# ─────────────────────────────────────────────
+# Build layout
+# ─────────────────────────────────────────────
+tmux new-session -d -s "$SESSION" -c "$PROJECT_DIR" -n editor
+tmux send-keys -t "$SESSION:editor" "nvim" C-m
+
+tmux new-window -t "$SESSION" -n processes -c "$PROJECT_DIR"
+
+tmux split-window -h -t "$SESSION:processes" -c "$PROJECT_DIR"
+tmux split-window -v -t "$SESSION:processes.2" -c "$PROJECT_DIR"
+tmux split-window -v -t "$SESSION:processes.3" -c "$PROJECT_DIR"
+
+tmux send-keys -t "$SESSION:processes.2" "npm run dev" C-m
+tmux send-keys -t "$SESSION:processes.3" "php artisan queue:work" C-m
+tmux send-keys -t "$SESSION:processes.4" "php artisan socketio:start" C-m
+
+tmux select-pane -t "$SESSION:processes.1"
+tmux resize-pane -t "$SESSION:processes.1" -R 5
+
+tmux select-window -t "$SESSION:editor"
+
+tmux_go "$SESSION"
