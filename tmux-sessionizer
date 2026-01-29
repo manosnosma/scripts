@@ -3,6 +3,7 @@
 DIRS=(
 	"$HOME/Projects/apps"
 	"$HOME/Projects/elixir"
+	"$HOME/Projects"
 	"$HOME/.config/"
 	"$HOME/Documents/Brain2.0"
 	"$HOME/Documents/files"
