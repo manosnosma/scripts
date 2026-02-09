@@ -23,7 +23,7 @@ fi
 # Build layout
 # ─────────────────────────────────────────────
 tmux new-session -d -s "$SESSION" -c "$PROJECT_DIR" -n editor
-tmux send-keys -t "$SESSION:editor" "nvim" C-m
+tmux send-keys -t "$SESSION:editor" "nvim ." C-m
 
 tmux new-window -t "$SESSION" -n processes -c "$PROJECT_DIR"
 
