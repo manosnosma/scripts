@@ -28,15 +28,20 @@ tmux send-keys -t "$SESSION:editor" "nvim" C-m
 tmux new-window -t "$SESSION" -n processes -c "$PROJECT_DIR"
 
 tmux split-window -h -t "$SESSION:processes" -c "$PROJECT_DIR"
-tmux split-window -v -t "$SESSION:processes.2" -c "$PROJECT_DIR"
-tmux split-window -v -t "$SESSION:processes.3" -c "$PROJECT_DIR"
+tmux split-window -v -p 65 -t "$SESSION:processes.2" -c "$PROJECT_DIR"
+tmux split-window -v -p 77 -t "$SESSION:processes.3" -c "$PROJECT_DIR"
+tmux split-window -v -p 70 -t "$SESSION:processes.4" -c "$PROJECT_DIR"
 
 tmux send-keys -t "$SESSION:processes.2" "npm run dev" C-m
 tmux send-keys -t "$SESSION:processes.3" "php artisan queue:work" C-m
 tmux send-keys -t "$SESSION:processes.4" "php artisan socketio:start" C-m
+tmux send-keys -t "$SESSION:processes.5" "mailpit --smtp 0.0.0.0:2525" C-m
 
 tmux select-pane -t "$SESSION:processes.1"
 tmux resize-pane -t "$SESSION:processes.1" -R 5
+
+tmux new-window -t "$SESSION" -n claude -c "$PROJECT_DIR"
+tmux send-keys -t "$SESSION:claude" "claude" C-m
 
 tmux select-window -t "$SESSION:editor"
 
