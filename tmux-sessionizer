@@ -29,20 +29,51 @@ else
 	current=""
 	[[ -n "$TMUX" ]] && current=$(tmux display-message -p '#S' 2>/dev/null)
 
-	sessions=$(tmux list-sessions -F '#{session_last_attached} #{session_name}' 2>/dev/null \
-		| sort -rn \
-		| awk -v cur="$current" '{ name=$2; if (name != cur) print "[s] " name }')
+	tmux_sessions=$(tmux list-sessions -F '#{session_last_attached} #{session_name}' 2>/dev/null | sort -rn)
 
-	existing=$(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+	export TS_SESSIONS="$tmux_sessions"
+	export TS_CUR="$current"
+	export TS_HOME="$HOME/"
 
-	dirs=$(fd . "${DIRS[@]}" --type=dir --max-depth=1 --full-path | while IFS= read -r d; do
-		name=$(basename "$d" | tr . _)
-		if ! printf '%s\n' "$existing" | grep -qxF "$name"; then
-			printf '%s\n' "${d#$HOME/}"
-		fi
-	done)
+	selected=$(
+		{
+			awk 'BEGIN {
+				cur = ENVIRON["TS_CUR"]
+				n = split(ENVIRON["TS_SESSIONS"], lines, "\n")
+				for (i = 1; i <= n; i++) {
+					p = index(lines[i], " ")
+					if (p > 0) {
+						name = substr(lines[i], p+1)
+						if (name != cur) print "[s] " name
+					}
+				}
+			}' </dev/null
 
-	selected=$(printf '%s\n%s\n' "$sessions" "$dirs" | sed '/^$/d' | sk --margin 10% --color="bw")
+			fd . "${DIRS[@]}" --type=dir --max-depth=1 --full-path | \
+				awk '
+					BEGIN {
+						n = split(ENVIRON["TS_SESSIONS"], lines, "\n")
+						for (i = 1; i <= n; i++) {
+							p = index(lines[i], " ")
+							if (p > 0) existing[substr(lines[i], p+1)] = 1
+						}
+						home = ENVIRON["TS_HOME"]
+						hlen = length(home)
+					}
+					{
+						path = $0
+						stripped = path
+						sub(/\/+$/, "", stripped)
+						k = split(stripped, parts, "/")
+						name = parts[k]
+						gsub(/\./, "_", name)
+						if (name in existing) next
+						if (substr(path, 1, hlen) == home) path = substr(path, hlen + 1)
+						print path
+					}
+				'
+		} | sk --margin 10% --color="bw"
+	)
 
 	if [[ $selected == "[s] "* ]]; then
 		tmux_run "${selected#\[s\] }"
