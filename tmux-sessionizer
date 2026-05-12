@@ -26,8 +26,22 @@ tmux_run() {
 if [[ $# -eq 1 ]]; then
 	selected=$1
 else
-	sessions=$(tmux ls 2>/dev/null | awk -F: '{print "[s] " $1}')
-	dirs=$(fd . "${DIRS[@]}" --type=dir --max-depth=1 --full-path | sed "s|^$HOME/||")
+	current=""
+	[[ -n "$TMUX" ]] && current=$(tmux display-message -p '#S' 2>/dev/null)
+
+	sessions=$(tmux list-sessions -F '#{session_last_attached} #{session_name}' 2>/dev/null \
+		| sort -rn \
+		| awk -v cur="$current" '{ name=$2; if (name != cur) print "[s] " name }')
+
+	existing=$(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+
+	dirs=$(fd . "${DIRS[@]}" --type=dir --max-depth=1 --full-path | while IFS= read -r d; do
+		name=$(basename "$d" | tr . _)
+		if ! printf '%s\n' "$existing" | grep -qxF "$name"; then
+			printf '%s\n' "${d#$HOME/}"
+		fi
+	done)
+
 	selected=$(printf '%s\n%s\n' "$sessions" "$dirs" | sed '/^$/d' | sk --margin 10% --color="bw")
 
 	if [[ $selected == "[s] "* ]]; then
