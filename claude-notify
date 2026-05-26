@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Claude Code hook -> macOS notification + tmux-aware click handler.
+#
+# Usage: claude-notify <event>
+#   event: notification | stop | subagent
+#   stdin: Claude Code hook JSON payload
+#
+# Click on banner -> switches the (sole) tmux client to the calling pane's
+# session:window, then brings Ghostty to front. Assumes one Ghostty window
+# with one attached tmux client (sessionizer pattern).
+#
+# Stop is suppressed when Ghostty is frontmost AND the active session:window
+# already matches the caller (you're staring at the pane).
+
+set -euo pipefail
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+event="${1:-notification}"
+payload="$(cat || true)"
+
+message="$(printf '%s' "$payload" | jq -r '.message // ""' 2>/dev/null || true)"
+cwd="$(printf '%s' "$payload" | jq -r '.cwd // ""' 2>/dev/null || true)"
+project="$(basename "${cwd:-$PWD}")"
+
+tmux_session=""
+tmux_window=""
+pane="${TMUX_PANE:-}"
+if [[ -n "${TMUX:-}" && -n "$pane" ]] && command -v tmux >/dev/null 2>&1; then
+  tmux_session="$(tmux display-message -p -t "$pane" '#S' 2>/dev/null || true)"
+  tmux_window="$(tmux display-message -p -t "$pane" '#I' 2>/dev/null || true)"
+fi
+
+# Suppress Stop when user is already on the calling pane.
+if [[ "$event" == "stop" && -n "$tmux_session" && -n "$tmux_window" ]]; then
+  frontmost="$(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null || true)"
+  if [[ "$frontmost" == "Ghostty" ]]; then
+    client="$(tmux list-clients -F '#{client_tty}' 2>/dev/null | head -1 || true)"
+    if [[ -n "$client" ]]; then
+      cur="$(tmux display-message -p -c "$client" '#S:#I' 2>/dev/null || true)"
+      [[ "$cur" == "$tmux_session:$tmux_window" ]] && exit 0
+    fi
+  fi
+fi
+
+case "$event" in
+  stop)         prefix="Done";          sound="Glass" ;;
+  subagent)     prefix="Subagent done"; sound="Pop"   ;;
+  notification) prefix="Needs input";   sound="Funk"  ;;
+  *)            prefix="$event";        sound="Glass" ;;
+esac
+
+body="$prefix"
+[[ -n "$message" ]] && body="$prefix: $message"
+
+subtitle="$project"
+[[ -n "$tmux_session" && -n "$tmux_window" ]] && subtitle="$project | $tmux_session:$tmux_window"
+
+# Per-pane group so parallel-worktree claudes don't overwrite each other.
+group="claude-${tmux_session:-nosess}-${tmux_window:-nowin}-${pane:-nopane}"
+
+focus_helper="/Users/nosma/.local/bin/scripts/claude-notify-focus"
+
+if [[ -n "$tmux_session" && -n "$tmux_window" && -x "$focus_helper" ]]; then
+  target="$(printf '%q' "$tmux_session:$tmux_window")"
+  terminal-notifier \
+    -title "Claude Code" \
+    -subtitle "$subtitle" \
+    -message "$body" \
+    -sound "$sound" \
+    -group "$group" \
+    -execute "$focus_helper $target" >/dev/null 2>&1 || true
+else
+  terminal-notifier \
+    -title "Claude Code" \
+    -subtitle "$subtitle" \
+    -message "$body" \
+    -sound "$sound" \
+    -group "$group" \
+    -activate com.mitchellh.ghostty >/dev/null 2>&1 || true
+fi

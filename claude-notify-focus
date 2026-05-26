@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Click handler for claude-notify banners.
+# Switches the sole attached tmux client to the given session:window,
+# then activates Ghostty.
+
+set -euo pipefail
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+target="${1:-}"
+[[ -z "$target" ]] && { open -a Ghostty; exit 0; }
+
+if command -v tmux >/dev/null 2>&1; then
+  client="$(tmux list-clients -F '#{client_tty}' 2>/dev/null | head -1 || true)"
+  if [[ -n "$client" ]]; then
+    tmux switch-client -c "$client" -t "$target" 2>/dev/null || true
+  fi
+fi
+
+open -a Ghostty
