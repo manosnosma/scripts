@@ -1,19 +1,48 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DIRS=(
-	"$HOME/Projects/apps"
-	"$HOME/Projects"
-	"$HOME/.config/"
-	"$HOME/.local/bin/scripts"
-	"$HOME/.local/bin"
-	"$HOME/Documents/Brain"
-	"$HOME/Documents/archives"
+# tmux-sessionizer — jump to a tmux session or project directory.
+#
+# Three ways to call it:
+#   tmux-sessionizer <path>   Open/attach a session for that directory.
+#   tmux-sessionizer <1-9>    Switch to the Nth most-recent session (1 = newest).
+#   tmux-sessionizer          Open an interactive picker (sessions, then dirs).
+#
+# In the picker: type to filter, arrows + enter to choose, or press 1-9 (while
+# the query is empty) to jump straight to that numbered session.
+#
+# Search paths come from a config file (one directory per line) if it exists:
+#   $XDG_CONFIG_HOME/tmux-sessionizer/dirs   (default: ~/.config/...)
+#   override the location with TMS_DIRS_FILE
+# Otherwise the built-in DEFAULT_DIRS below are used.
+
+DEFAULT_DIRS=(
 	"$HOME/Documents"
-	"$HOME/Pictures/screenshots"
-	"$HOME/Pictures"
 )
 
+# Populate the DIRS array. Reads the config file (one path per line; blank lines
+# and #-comments ignored; a leading ~ and $HOME are expanded) when present and
+# non-empty, otherwise falls back to DEFAULT_DIRS.
+load_dirs() {
+	local config="${TMS_DIRS_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/tmux-sessionizer/dirs}"
+	DIRS=()
+	if [[ -r $config ]]; then
+		local line
+		while IFS= read -r line || [[ -n $line ]]; do
+			line=${line#"${line%%[![:space:]]*}"}   # trim leading whitespace
+			line=${line%"${line##*[![:space:]]}"}   # trim trailing whitespace
+			[[ -z $line || $line == \#* ]] && continue
+			[[ ${line:0:1} == '~' ]] && line=$HOME${line:1}   # expand a leading ~
+			line=${line//\$\{HOME\}/$HOME}
+			line=${line//\$HOME/$HOME}
+			DIRS+=("$line")
+		done < "$config"
+	fi
+	((${#DIRS[@]})) || DIRS=("${DEFAULT_DIRS[@]}")
+}
+
+# Switch to (or attach) a session by name. The "rws" session is special and is
+# always (re)built by the dedicated tmux-rws script.
 tmux_run() {
 	local target="$1"
 
@@ -28,13 +57,8 @@ tmux_run() {
 	fi
 }
 
-session_name_from_line() {
-	local line="${1%%$'\n'*}"
-	line="${line%"${line##*[![:space:]]}"}"
-	[[ $line =~ ^(\[[0-9]+\])?\[s\]\ ([^[:space:]]+)$ ]] || return 1
-	printf '%s' "${BASH_REMATCH[2]}"
-}
-
+# Open a directory: derive its session name (basename, dots → underscores),
+# create the session if it doesn't exist yet, then switch to it.
 attach_or_create() {
 	local path="$1"
 	local name
@@ -51,12 +75,100 @@ attach_or_create() {
 	tmux_run "$name"
 }
 
-# Direct path argument (anything except a lone digit 1-9)
+# Extract the session name from a picked menu line such as "[1][s] myproj".
+# Returns non-zero (so the caller treats it as a directory) when it isn't a
+# session line.
+session_name_from_line() {
+	local line="${1%%$'\n'*}"
+	line="${line%"${line##*[![:space:]]}"}"
+	[[ $line =~ ^(\[[0-9]+\])?\[s\]\ ([^[:space:]]+)$ ]] || return 1
+	printf '%s' "${BASH_REMATCH[2]}"
+}
+
+# Emit session names in MRU order, excluding the current session.
+# Reads the globals $tmux_sessions and $current. Each input line looks like
+# "<last_attached> <name>", but <last_attached> is empty for never-attached
+# sessions, so we take everything after the first space (not the 2nd field).
+get_sessions() {
+	local line name
+	while IFS= read -r line; do
+		[[ $line == *" "* ]] || continue            # need "<ts> <name>"
+		name=${line#* }                             # drop the timestamp field
+		name=${name#"${name%%[![:space:]]*}"}       # trim leading whitespace
+		name=${name%"${name##*[![:space:]]}"}       # trim trailing whitespace
+		[[ -z $name || $name == "$current" ]] && continue
+		printf '%s\n' "$name"
+	done <<< "$tmux_sessions"
+}
+
+# List candidate project directories (one level under each DIRS entry), skipping
+# any whose derived session name already exists, with $HOME/ stripped for display.
+# The awk reads sessions from $TS_SESSIONS and home from $TS_HOME.
+list_directories() {
+	fd . "${DIRS[@]}" --type=dir --max-depth=1 --full-path | awk '
+		BEGIN {
+			n = split(ENVIRON["TS_SESSIONS"], lines, "\n")
+			for (i = 1; i <= n; i++) {
+				if (lines[i] == "") continue
+				p = index(lines[i], " ")
+				if (p > 0) {
+					name = substr(lines[i], p + 1)
+					gsub(/^[ \t]+|[ \t]+$/, "", name)
+					if (name != "") existing[name] = 1
+				}
+			}
+			home = ENVIRON["TS_HOME"]
+			hlen = length(home)
+		}
+		{
+			path = $0
+			stripped = path
+			sub(/\/+$/, "", stripped)
+			k = split(stripped, parts, "/")
+			name = parts[k]
+			gsub(/\./, "_", name)
+			if (name in existing) next
+			if (substr(path, 1, hlen) == home) path = substr(path, hlen + 1)
+			print path
+		}
+	'
+}
+
+# Build the picker menu: sessions first (the first 9 get a [n] prefix for the
+# digit shortcuts), then the candidate directories. Reads the $sessions array.
+build_menu() {
+	local count=${#sessions[@]} i
+	for ((i = 0; i < count; i++)); do
+		if ((i < 9)); then
+			printf '[%d][s] %s\n' "$((i + 1))" "${sessions[i]}"
+		else
+			printf '[s] %s\n' "${sessions[i]}"
+		fi
+	done
+	list_directories
+}
+
+# Build the skim --bind string: enter accepts the highlighted row, and 1-9
+# accept the matching session line directly (but only while the query is empty,
+# so typing digits still filters). Reads the $sessions array.
+build_keybinds() {
+	local binds='enter:accept' count=${#sessions[@]} i slot line
+	for ((i = 0; i < count && i < 9; i++)); do
+		slot=$((i + 1))
+		line="[${slot}][s] ${sessions[i]}"
+		line=${line//\\/\\\\}   # escape backslashes for the bind string
+		binds+=",${slot}:if-query-empty:accept(${line})"
+	done
+	printf '%s' "$binds"
+}
+
+# ── Mode 1: explicit path argument ───────────────────────────────────
 if [[ $# -eq 1 && ! $1 =~ ^[1-9]$ ]]; then
 	attach_or_create "$1"
 	exit 0
 fi
 
+# Gather the current session and the MRU-ordered session list.
 current=""
 [[ -n "${TMUX:-}" ]] && current=$(tmux display-message -p '#S' 2>/dev/null || true)
 
@@ -64,130 +176,30 @@ tmux_sessions=$(
 	tmux list-sessions -F '#{session_last_attached} #{session_name}' 2>/dev/null | sort -rn || true
 )
 
-# Numeric shortcut: tmux-sessionizer 3 → 3rd most recent session (excluding current)
+sessions=()
+while IFS= read -r session; do
+	sessions+=("$session")
+done < <(get_sessions)
+
+# ── Mode 2: numeric argument → Nth most-recent session (1 = newest) ───
 if [[ $# -eq 1 && $1 =~ ^[1-9]$ ]]; then
-	idx=$1
-	name=$(
-		export TS_SESSIONS="$tmux_sessions" TS_CUR="$current"
-		awk -v n="$idx" 'BEGIN {
-			cur = ENVIRON["TS_CUR"]
-			split(ENVIRON["TS_SESSIONS"], lines, "\n")
-			i = 0
-			for (k = 1; k <= length(lines); k++) {
-				if (lines[k] == "") continue
-				p = index(lines[k], " ")
-				if (p == 0) continue
-				name = substr(lines[k], p + 1)
-				gsub(/^[ \t]+|[ \t]+$/, "", name)
-				if (name == "" || name == cur) continue
-				i++
-				if (i == n) { print name; exit }
-			}
-		}' </dev/null
-	)
+	name=${sessions[$1 - 1]:-}
 	[[ -n $name ]] || exit 1
 	tmux_run "$name"
 	exit 0
 fi
 
+# ── Mode 3: interactive picker ────────────────────────────────────────
+load_dirs
+
 export TS_SESSIONS="$tmux_sessions"
-export TS_CUR="$current"
 export TS_HOME="$HOME/"
 
-session_slots=$(
-	awk 'BEGIN {
-		cur = ENVIRON["TS_CUR"]
-		n = split(ENVIRON["TS_SESSIONS"], lines, "\n")
-		for (i = 1; i <= n; i++) {
-			if (lines[i] == "") continue
-			p = index(lines[i], " ")
-			if (p == 0) continue
-			name = substr(lines[i], p + 1)
-			gsub(/^[ \t]+|[ \t]+$/, "", name)
-			if (name == "" || name == cur) continue
-			print name
-		}
-	}' </dev/null | wc -l | tr -d ' '
-)
-
-menu=$(
-	{
-		awk 'BEGIN {
-			cur = ENVIRON["TS_CUR"]
-			n = split(ENVIRON["TS_SESSIONS"], lines, "\n")
-			slot = 0
-			for (i = 1; i <= n; i++) {
-				if (lines[i] == "") continue
-				p = index(lines[i], " ")
-				if (p == 0) continue
-				name = substr(lines[i], p + 1)
-				gsub(/^[ \t]+|[ \t]+$/, "", name)
-				if (name == "" || name == cur) continue
-				slot++
-				if (slot <= 9)
-					printf "[%d][s] %s\n", slot, name
-				else
-					printf "[s] %s\n", name
-			}
-		}' </dev/null
-
-		fd . "${DIRS[@]}" --type=dir --max-depth=1 --full-path | awk '
-			BEGIN {
-				n = split(ENVIRON["TS_SESSIONS"], lines, "\n")
-				for (i = 1; i <= n; i++) {
-					if (lines[i] == "") continue
-					p = index(lines[i], " ")
-					if (p > 0) {
-						name = substr(lines[i], p + 1)
-						gsub(/^[ \t]+|[ \t]+$/, "", name)
-						if (name != "") existing[name] = 1
-					}
-				}
-				home = ENVIRON["TS_HOME"]
-				hlen = length(home)
-			}
-			{
-				path = $0
-				stripped = path
-				sub(/\/+$/, "", stripped)
-				k = split(stripped, parts, "/")
-				name = parts[k]
-				gsub(/\./, "_", name)
-				if (name in existing) next
-				if (substr(path, 1, hlen) == home) path = substr(path, hlen + 1)
-				print path
-			}
-		'
-	}
-)
+menu=$(build_menu)
 
 sk_header="tmux-sessionizer"
 [[ -n $current ]] && sk_header+=" · current: ${current}"
 sk_header+=$'\n'"1-9 switch session · type to filter · enter opens dir"
-
-sk_binds='enter:accept'
-while IFS= read -r bind; do
-	[[ -n $bind ]] && sk_binds+=",$bind"
-done < <(
-	awk 'BEGIN {
-		cur = ENVIRON["TS_CUR"]
-		n = split(ENVIRON["TS_SESSIONS"], lines, "\n")
-		slot = 0
-		for (i = 1; i <= n; i++) {
-			if (lines[i] == "") continue
-			p = index(lines[i], " ")
-			if (p == 0) continue
-			name = substr(lines[i], p + 1)
-			gsub(/^[ \t]+|[ \t]+$/, "", name)
-			if (name == "" || name == cur) continue
-			slot++
-			if (slot > 9) break
-			line = sprintf("[%d][s] %s", slot, name)
-			gsub(/\\/, "\\\\", line)
-			printf "%d:if-query-empty:accept(%s)\n", slot, line
-		}
-	}' </dev/null
-)
 
 selected=$(
 	printf '%s\n' "$menu" | sk \
@@ -195,7 +207,7 @@ selected=$(
 		--color=dark \
 		--header "$sk_header" \
 		--prompt 'session> ' \
-		--bind "$sk_binds" | head -n1
+		--bind "$(build_keybinds)" | head -n1
 ) || exit 1
 
 selected="${selected%%$'\n'*}"
